@@ -1,7 +1,7 @@
-use futures::{future::Executor, Future};
+use futures::{prelude::*, task};
 
 use crate::connection::{connect, Connection, ConnectionInfo, ConnectionLike, IntoConnectionInfo};
-use crate::types::{RedisError, RedisResult, Value};
+use crate::types::{RedisResult, Value};
 
 /// The client type.
 #[derive(Debug, Clone)]
@@ -45,34 +45,47 @@ impl Client {
     }
 
     /// Returns an async connection from the client.
-    pub fn get_async_connection(
-        &self,
-    ) -> impl Future<Item = crate::aio::Connection, Error = RedisError> {
-        crate::aio::connect(self.connection_info.clone())
+    pub fn get_async_connection<'a>(
+        &'a self,
+    ) -> impl Future<Output = RedisResult<crate::aio::Connection>> + 'a {
+        crate::aio::connect(&self.connection_info)
     }
 
     /// Returns a async shared connection from the client.
     ///
     /// This uses the default tokio executor.
     #[cfg(feature = "executor")]
-    pub fn get_shared_async_connection(
-        &self,
-    ) -> impl Future<Item = crate::aio::SharedConnection, Error = RedisError> {
-        let executor = tokio_executor::DefaultExecutor::current();
-        self.get_async_connection()
-            .and_then(move |con| crate::aio::SharedConnection::new(con, executor))
+    pub fn get_shared_async_connection<'a>(
+        &'a self,
+    ) -> impl Future<Output = RedisResult<crate::aio::SharedConnection>> + 'a {
+        struct TokioExecutor;
+        impl task::Spawn for TokioExecutor {
+            fn spawn_obj(
+                &mut self,
+                future: future::FutureObj<'static, ()>,
+            ) -> Result<(), task::SpawnError> {
+                use tokio::executor::Executor;
+                tokio::executor::DefaultExecutor::current()
+                    .spawn(future.boxed())
+                    .map_err(|_| task::SpawnError::shutdown())
+            }
+        }
+
+        self.get_async_connection().and_then(move |con| {
+            future::ready(crate::aio::SharedConnection::new(con, TokioExecutor))
+        })
     }
 
     /// Returns a async shared connection with a specific executor.
-    pub fn get_shared_async_connection_with_executor<E>(
-        &self,
+    pub fn get_shared_async_connection_with_executor<'a, E>(
+        &'a self,
         executor: E,
-    ) -> impl Future<Item = crate::aio::SharedConnection, Error = RedisError>
+    ) -> impl Future<Output = RedisResult<crate::aio::SharedConnection>> + 'a
     where
-        E: Executor<Box<dyn Future<Item = (), Error = ()> + Send>>,
+        E: task::Spawn + 'a,
     {
         self.get_async_connection()
-            .and_then(move |con| crate::aio::SharedConnection::new(con, executor))
+            .and_then(move |con| future::ready(crate::aio::SharedConnection::new(con, executor)))
     }
 }
 
